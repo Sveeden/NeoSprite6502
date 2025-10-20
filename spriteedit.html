@@ -1,0 +1,288 @@
+<!--
+Neo6502 Sprite Editor — Tiles, 16×16 & 32×32 Sprites
+This HTML + JavaScript file provides a sprite and tile editor compatible with Neo6502 .gfx format.
+It supports editing 16×16 tiles, 16×16 sprites, and 32×32 sprites with palette-based painting,
+thumbnails, and .gfx export.
+Each function and major block is commented below for clarity.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neo6502 Sprite Editor — Tiles, 16×16 & 32×32 Sprites</title>
+  <style>
+    /* Basic page and layout styling */
+    body { margin:0; background:#0f1115; color:#e6e6e6; font:14px/1.4 system-ui, sans-serif; }
+    .wrap { max-width:1100px; margin:24px auto; padding:0 16px; }
+    .row { display:flex; gap:20px; align-items:flex-start; }
+    /* Main drawing canvas */
+    canvas { display:block; border:1px solid #444; border-radius:8px; background:#ff00ff; image-rendering:pixelated; cursor:crosshair; }
+    /* Controls and buttons */
+    button, input[type="text"], select { margin:4px; padding:6px 10px; border-radius:6px; border:1px solid #555; background:#1a1d26; color:white; }
+    /* Palette grid layout */
+    .grid { display:grid; grid-template-columns:repeat(16,22px); gap:4px; margin-top:8px; }
+    .swatch { width:22px; height:22px; border:1px solid #444; border-radius:4px; }
+    .swatch.active { outline:2px solid #fff; }
+    /* Thumbnail grid below editor */
+    #thumbnailGrid { display:grid; grid-template-columns:repeat(auto-fill, 64px); gap:8px; margin-top:20px; }
+    .thumb { width:64px; height:64px; border:1px solid #444; background:#ff00ff; border-radius:6px; image-rendering:pixelated; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Neo6502 Sprite Editor — Tiles, 16×16 & 32×32 Sprites</h2>
+
+    <!-- Mode selector lets user choose which graphic type to edit -->
+    <div>
+      <label for="mode">Edit mode:</label>
+      <select id="mode">
+        <option value="tile">Tiles (16×16, $00–$7F)</option>
+        <option value="sprite16">Sprites (16×16, $80–$BF)</option>
+        <option value="sprite32">Sprites (32×32, $C0–$FF)</option>
+      </select>
+    </div>
+
+    <!-- Layout: left = canvas, right = tools -->
+    <div class="row">
+      <div>
+        <canvas id="cvs" width="320" height="320"></canvas>
+      </div>
+      <div>
+        <!-- Basic drawing tools -->
+        <div>
+          <button id="brush">Brush</button>
+          <button id="erase">Erase</button>
+          <button id="fill">Fill</button>
+          <button id="pick">Pick</button>
+        </div>
+
+        <!-- Frame selector (for individual tile/sprite index) -->
+        <div style="margin:6px 0">
+          <label for="spriteSelect">Frame:</label>
+          <select id="spriteSelect"></select>
+        </div>
+
+        <!-- Palette display -->
+        <div id="palette" class="grid"></div>
+
+        <!-- Export controls -->
+        <div style="margin-top:10px">
+          <input type="text" id="gfxName" placeholder="graphics.gfx" style="width:200px" />
+          <button id="export">Export</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Thumbnails of all frames in current mode -->
+    <h3>Thumbnails</h3>
+    <div id="thumbnailGrid"></div>
+  </div>
+
+  <script>
+  (function(){
+    // ---------------------------------------------
+    // Palette (16 colors) matches Neo6502 firmware
+    // ---------------------------------------------
+    const palette=[[0,0,0],[255,0,77],[0,228,54],[255,236,39],[29,43,83],[126,37,83],[41,173,255],[255,241,232],[0,0,0],[95,87,79],[0,135,81],[255,163,0],[171,82,54],[131,118,156],[255,204,170],[194,195,199]];
+
+    // Frame definitions for each graphic type
+    const framesets = {
+      tile:  {size:16, count:128, offset:0x00},
+      sprite16:{size:16, count:64, offset:0x80},
+      sprite32:{size:32, count:64, offset:0xC0}
+    };
+
+    // Editor state variables
+    let mode='tile';           // Current edit mode (tile, sprite16, sprite32)
+    let size=16;               // Size in pixels of current canvas grid
+    // Storage arrays for all image sets
+    let frames={
+      tile:Array.from({length:128},()=>new Uint8Array(16*16)),
+      sprite16:Array.from({length:64},()=>new Uint8Array(16*16)),
+      sprite32:Array.from({length:64},()=>new Uint8Array(32*32))
+    };
+
+    let currentFrame=0, tool='brush', color=1; // Drawing state
+    const cvs=document.getElementById('cvs'), ctx=cvs.getContext('2d');
+    let isDrawing=false; // Mouse state for dragging
+
+    // ------------------------------------------------------------
+    // draw() — renders current frame onto main canvas
+    // ------------------------------------------------------------
+    function draw(){
+      ctx.fillStyle='#ff00ff'; // Magenta = transparent background
+      ctx.fillRect(0,0,cvs.width,cvs.height);
+      const data=frames[mode][currentFrame];
+      // Draw each pixel according to selected palette color
+      for(let y=0;y<size;y++){
+        for(let x=0;x<size;x++){
+          const idx=data[y*size+x];
+          if(idx===0) continue; // skip transparent
+          const [r,g,b]=palette[idx];
+          ctx.fillStyle=`rgb(${r},${g},${b})`;
+          ctx.fillRect(x*(320/size),y*(320/size),(320/size),(320/size));
+        }
+      }
+      // Overlay grid lines
+      ctx.strokeStyle='rgba(0,0,0,0.4)';
+      for(let i=0;i<=size;i++){
+        ctx.beginPath(); ctx.moveTo(i*(320/size),0); ctx.lineTo(i*(320/size),320); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0,i*(320/size)); ctx.lineTo(320,i*(320/size)); ctx.stroke();
+      }
+      updateThumbnails(); // Refresh thumbnail display
+    }
+
+    // ------------------------------------------------------------
+    // paintAt() — paints or erases pixel at mouse position
+    // ------------------------------------------------------------
+    function paintAt(e){
+      const r=cvs.getBoundingClientRect();
+      const x=Math.floor((e.clientX-r.left)/(320/size));
+      const y=Math.floor((e.clientY-r.top)/(320/size));
+      if(x<0||y<0||x>=size||y>=size) return;
+      const data=frames[mode][currentFrame];
+      if(tool==='brush') data[y*size+x]=color;
+      if(tool==='erase') data[y*size+x]=0;
+      draw();
+    }
+
+    // ------------------------------------------------------------
+    // fillAll() — fills the entire frame with selected color
+    // ------------------------------------------------------------
+    function fillAll(){
+      const data=frames[mode][currentFrame];
+      for(let i=0;i<data.length;i++) data[i]=color;
+      draw();
+    }
+
+    // Mouse controls for continuous drawing
+    cvs.addEventListener('mousedown',e=>{isDrawing=true; paintAt(e);});
+    cvs.addEventListener('mousemove',e=>{if(isDrawing) paintAt(e);});
+    window.addEventListener('mouseup',()=>{isDrawing=false;});
+
+    // ------------------------------------------------------------
+    // buildPalette() — builds clickable color palette grid
+    // ------------------------------------------------------------
+    function buildPalette(){
+      const pal=document.getElementById('palette');
+      pal.innerHTML='';
+      for(let i=0;i<16;i++){
+        const d=document.createElement('div');
+        d.className='swatch'+(i===color?' active':'');
+        d.style.background=i===0?'#000':`rgb(${palette[i][0]},${palette[i][1]},${palette[i][2]})`;
+        d.onclick=()=>{color=i;buildPalette();};
+        pal.appendChild(d);
+      }
+    }
+
+    // ------------------------------------------------------------
+    // populateFrames() — fills frame dropdown with current set
+    // ------------------------------------------------------------
+    const spriteSelect=document.getElementById('spriteSelect');
+    function populateFrames(){
+      spriteSelect.innerHTML='';
+      const set=framesets[mode];
+      size=set.size; // adjust canvas scale
+      for(let i=0;i<set.count;i++){
+        const opt=document.createElement('option');
+        const hex=(set.offset+i).toString(16).toUpperCase().padStart(2,'0');
+        opt.value=i; opt.textContent=`$${hex}`;
+        spriteSelect.appendChild(opt);
+      }
+      currentFrame=0;
+      draw();
+    }
+
+    // Mode & frame change handlers
+    document.getElementById('mode').addEventListener('change',e=>{mode=e.target.value;populateFrames();});
+    spriteSelect.addEventListener('change',()=>{currentFrame=parseInt(spriteSelect.value);draw();});
+
+    // Tool buttons
+    document.getElementById('brush').onclick=()=>tool='brush';
+    document.getElementById('erase').onclick=()=>tool='erase';
+    document.getElementById('fill').onclick=()=>fillAll();
+    document.getElementById('pick').onclick=()=>tool='pick';
+
+    // ------------------------------------------------------------
+    // Export .gfx — saves all sections to a single .gfx file
+    // ------------------------------------------------------------
+    document.getElementById('export').onclick=()=>{
+      const nameInput=document.getElementById('gfxName');
+      let filename=nameInput.value.trim()||'graphics.gfx';
+      if(!filename.endsWith('.gfx')) filename+='.gfx';
+
+      // .gfx header layout
+      const headerSize=256;
+      const totalBytes = headerSize + 128*(16*16/2) + 64*(16*16/2) + 64*(32*32/2);
+      const bytes=new Uint8Array(totalBytes);
+      bytes[0]=1; bytes[1]=128; bytes[2]=64; bytes[3]=64; // header counts
+
+      let ptr=headerSize;
+
+      // Helper to encode 2 pixels per byte
+      function writeSection(setname){
+        const set=framesets[setname];
+        for(let f=0;f<set.count;f++){
+          const fr=frames[setname][f];
+          for(let y=0;y<set.size;y++){
+            for(let x=0;x<set.size;x+=2){
+              const left=fr[y*set.size+x]&0xF;
+              const right=fr[y*set.size+x+1]&0xF;
+              bytes[ptr++]=(left<<4)|right;
+            }
+          }
+        }
+      }
+      // Write all image sections
+      writeSection('tile');
+      writeSection('sprite16');
+      writeSection('sprite32');
+
+      // Trigger file download
+      const blob=new Blob([bytes],{type:'application/octet-stream'});
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download=filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+      a.remove();
+    };
+
+    // ------------------------------------------------------------
+    // updateThumbnails() — creates small previews for all frames
+    // ------------------------------------------------------------
+    function updateThumbnails(){
+      const grid=document.getElementById('thumbnailGrid');
+      grid.innerHTML='';
+      const set=framesets[mode];
+      for(let f=0;f<set.count;f++){
+        const tn=document.createElement('canvas');
+        tn.width=64; tn.height=64; tn.className='thumb';
+        const tctx=tn.getContext('2d');
+        const data=frames[mode][f];
+        tctx.fillStyle='#ff00ff';
+        tctx.fillRect(0,0,64,64);
+        const scale=set.size===16?4:2; // scale depends on tile size
+        for(let y=0;y<set.size;y++){
+          for(let x=0;x<set.size;x++){
+            const idx=data[y*set.size+x];
+            if(idx===0) continue;
+            const [r,g,b]=palette[idx];
+            tctx.fillStyle=`rgb(${r},${g},${b})`;
+            tctx.fillRect(x*scale,y*scale,scale,scale);
+          }
+        }
+        tn.onclick=()=>{currentFrame=f; spriteSelect.value=f; draw();};
+        grid.appendChild(tn);
+      }
+    }
+
+    // Initialize palette and frames
+    buildPalette();
+    populateFrames();
+  })();
+  </script>
+</body>
+</html>
