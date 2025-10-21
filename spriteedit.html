@@ -20,6 +20,7 @@
 <body>
   <div class="wrap">
     <h2>Neo6502 Sprite Editor — Tiles, 16×16 & 32×32 Sprites</h2>
+
     <div>
       <label for="mode">Edit mode:</label>
       <select id="mode">
@@ -38,7 +39,6 @@
           <button id="brush">Brush</button>
           <button id="erase">Erase</button>
           <button id="fill">Fill</button>
-          <button id="pick">Pick</button>
         </div>
         <div style="margin:6px 0">
           <label for="spriteSelect">Frame:</label>
@@ -47,7 +47,10 @@
         <div id="palette" class="grid"></div>
         <div style="margin-top:10px">
           <input type="text" id="gfxName" placeholder="graphics.gfx" style="width:200px" />
-          <button id="export">Export</button>
+          <button id="export">Export GFX</button>
+          <button id="savePng">Save PNG</button>
+          <input type="file" id="loadPng" accept="image/png" style="display:none" />
+          <button id="loadPngBtn">Load PNG</button>
         </div>
       </div>
     </div>
@@ -59,7 +62,6 @@
   <script>
   (function(){
     const palette=[[0,0,0],[255,0,77],[0,228,54],[255,236,39],[29,43,83],[126,37,83],[41,173,255],[255,241,232],[0,0,0],[95,87,79],[0,135,81],[255,163,0],[171,82,54],[131,118,156],[255,204,170],[194,195,199]];
-
     const framesets = {
       tile:  {size:16, count:128, offset:0x00, background:'#000000'},
       sprite16:{size:16, count:64, offset:0x80, background:'#ff00ff'},
@@ -73,6 +75,7 @@
     const cvs=document.getElementById('cvs'), ctx=cvs.getContext('2d');
     let isDrawing=false;
 
+    // Draw main canvas
     function draw(){
       ctx.fillStyle=framesets[mode].background;
       ctx.fillRect(0,0,cvs.width,cvs.height);
@@ -94,6 +97,7 @@
       updateThumbnails();
     }
 
+    // Paint pixel
     function paintAt(e){
       const r=cvs.getBoundingClientRect();
       const x=Math.floor((e.clientX-r.left)/(320/size));
@@ -115,6 +119,7 @@
     cvs.addEventListener('mousemove',e=>{if(isDrawing) paintAt(e);});
     window.addEventListener('mouseup',()=>{isDrawing=false;});
 
+    // Palette
     function buildPalette(){
       const pal=document.getElementById('palette');
       pal.innerHTML='';
@@ -127,6 +132,7 @@
       }
     }
 
+    // Frame dropdown
     const spriteSelect=document.getElementById('spriteSelect');
     function populateFrames(){
       spriteSelect.innerHTML='';
@@ -147,8 +153,8 @@
     document.getElementById('brush').onclick=()=>tool='brush';
     document.getElementById('erase').onclick=()=>tool='erase';
     document.getElementById('fill').onclick=()=>fillAll();
-    document.getElementById('pick').onclick=()=>tool='pick';
 
+    // Export GFX
     document.getElementById('export').onclick=()=>{
       const nameInput=document.getElementById('gfxName');
       let filename=nameInput.value.trim()||'graphics.gfx';
@@ -158,7 +164,6 @@
       const bytes=new Uint8Array(totalBytes);
       bytes[0]=1; bytes[1]=128; bytes[2]=64; bytes[3]=64;
       let ptr=headerSize;
-
       function writeSection(setname){
         const set=framesets[setname];
         for(let f=0;f<set.count;f++){
@@ -172,19 +177,87 @@
           }
         }
       }
-      writeSection('tile');
-      writeSection('sprite16');
-      writeSection('sprite32');
-
+      writeSection('tile'); writeSection('sprite16'); writeSection('sprite32');
       const blob=new Blob([bytes],{type:'application/octet-stream'});
       const a=document.createElement('a');
       a.href=URL.createObjectURL(blob);
-      a.download=filename;
-      document.body.appendChild(a);
-      a.click();
+      a.download=filename; a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-      a.remove();
     };
+
+    // Save as PNG
+    document.getElementById('savePng').onclick=()=>{
+      const set=framesets[mode];
+      const cols=16; const rows=Math.ceil(set.count/cols);
+      const tileSize=set.size;
+      const outCanvas=document.createElement('canvas');
+      outCanvas.width=cols*tileSize;
+      outCanvas.height=rows*tileSize;
+      const octx=outCanvas.getContext('2d');
+      octx.fillStyle=set.background;
+      octx.fillRect(0,0,outCanvas.width,outCanvas.height);
+      for(let i=0;i<set.count;i++){
+        const frame=frames[mode][i];
+        const cx=(i%cols)*tileSize;
+        const cy=Math.floor(i/cols)*tileSize;
+        for(let y=0;y<tileSize;y++){
+          for(let x=0;x<tileSize;x++){
+            const idx=frame[y*tileSize+x];
+            if(idx===0) continue;
+            const [r,g,b]=palette[idx];
+            octx.fillStyle=`rgb(${r},${g},${b})`;
+            octx.fillRect(cx+x,cy+y,1,1);
+          }
+        }
+      }
+      const link=document.createElement('a');
+      link.download=`${mode}.png`;
+      link.href=outCanvas.toDataURL('image/png');
+      link.click();
+    };
+
+    // Load PNG
+    document.getElementById('loadPngBtn').onclick=()=>document.getElementById('loadPng').click();
+    document.getElementById('loadPng').addEventListener('change',function(e){
+      const file=e.target.files[0];
+      if(!file) return;
+      const img=new Image();
+      img.onload=function(){
+        const set=framesets[mode];
+        const cols=16; const rows=Math.ceil(set.count/cols);
+        const tileSize=set.size;
+        const tmp=document.createElement('canvas');
+        tmp.width=img.width; tmp.height=img.height;
+        const ictx=tmp.getContext('2d');
+        ictx.drawImage(img,0,0);
+        const pixels=ictx.getImageData(0,0,img.width,img.height).data;
+        function nearestPalette(r,g,b){
+          let best=0, bestd=999999;
+          for(let i=0;i<palette.length;i++){
+            const [pr,pg,pb]=palette[i];
+            const d=(r-pr)**2+(g-pg)**2+(b-pb)**2;
+            if(d<bestd){bestd=d;best=i;}
+          }
+          return best;
+        }
+        for(let i=0;i<set.count;i++){
+          const cx=(i%cols)*tileSize;
+          const cy=Math.floor(i/cols)*tileSize;
+          const frame=new Uint8Array(tileSize*tileSize);
+          for(let y=0;y<tileSize;y++){
+            for(let x=0;x<tileSize;x++){
+              const p=((cy+y)*img.width+(cx+x))*4;
+              const r=pixels[p], g=pixels[p+1], b=pixels[p+2];
+              frame[y*tileSize+x]=nearestPalette(r,g,b);
+            }
+          }
+          frames[mode][i]=frame;
+        }
+        draw();
+        alert("PNG sheet loaded into "+mode+"!");
+      };
+      img.src=URL.createObjectURL(file);
+    });
 
     function updateThumbnails(){
       const grid=document.getElementById('thumbnailGrid');
